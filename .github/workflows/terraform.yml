@@ -1,0 +1,520 @@
+# =============================================================================
+# Terraform Workflow - Plan and Apply with Environment Protection
+# =============================================================================
+#
+# This workflow handles Terraform operations for both single-project and
+# multi-environment deployments.
+#
+# Deployment Models:
+#   - Single Project: main branch only, "prd" environment
+#   - Multi-Environment: develop/testing/main branches with dev/tst/prd environments
+#
+# Key Features:
+#   - Plan runs automatically on PRs and pushes
+#   - Apply ALWAYS requires manual approval via GitHub Environments
+#   - Policy checks (Checkov + Conftest) run before apply
+#   - Full audit trail with deployment summaries
+#
+# =============================================================================
+
+name: Terraform
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+  push:
+    # Configure branches based on your deployment model:
+    # - Single project: [main]
+    # - Multi-environment: [main, develop, testing]
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  TF_VERSION: "1.10"
+  TF_INPUT: "false"
+  TF_IN_AUTOMATION: "true"
+  WORKING_DIR: terraform
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+  security-events: write
+  actions: read
+
+jobs:
+  # ===========================================================================
+  # Determine Environment: Maps branch to environment name
+  # ===========================================================================
+  setup:
+    name: Setup
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      should_apply: ${{ steps.env.outputs.should_apply }}
+    steps:
+      - name: Determine Environment
+        id: env
+        run: |
+          # Map branch to environment
+          # Customize this mapping for your deployment model
+          case "${{ github.ref_name }}" in
+            main)
+              echo "environment=prd" >> "$GITHUB_OUTPUT"
+              ;;
+            testing)
+              echo "environment=tst" >> "$GITHUB_OUTPUT"
+              ;;
+            develop)
+              echo "environment=dev" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              # Default to prd for PRs/Feature branches to validate against prd state
+              echo "environment=prd" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+          # Only apply on manual dispatch (workflow_dispatch)
+          # This replaces "Required Reviewers" protection for Free/Private repos
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "should_apply=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_apply=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log Configuration
+        run: |
+          {
+            echo "## Workflow Configuration"
+            echo ""
+            echo "| Setting | Value |"
+            echo "|---------|-------|"
+            echo "| Branch | \`${{ github.ref_name }}\` |"
+            echo "| Environment | \`${{ steps.env.outputs.environment }}\` |"
+            echo "| Event | \`${{ github.event_name }}\` |"
+            echo "| Should Apply | \`${{ steps.env.outputs.should_apply }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # Plan: Generate Terraform plan
+  # ===========================================================================
+  plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    needs: setup
+    environment: ${{ needs.setup.outputs.environment }}
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+      plan_exitcode: ${{ steps.plan.outputs.exitcode }}
+      add: ${{ steps.summary.outputs.add }}
+      change: ${{ steps.summary.outputs.change }}
+      destroy: ${{ steps.summary.outputs.destroy }}
+
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    env:
+      INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+      TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+      TF_VAR_state_bucket: ${{ vars.GCP_STATE_BUCKET }}
+      TF_VAR_environment: ${{ needs.setup.outputs.environment }}
+      TF_VAR_repository_id: ${{ github.repository }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Cache Terraform Plugins
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.terraform.d/plugin-cache
+            ${{ env.WORKING_DIR }}/.terraform
+          key: terraform-${{ runner.os }}-${{ hashFiles('terraform/.terraform.lock.hcl') }}
+          restore-keys: |
+            terraform-${{ runner.os }}-
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Terraform Init
+        id: init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.GCP_STATE_BUCKET }}"
+          terraform get -update
+
+      - name: Terraform Format Check
+        id: fmt
+        run: terraform fmt -check -recursive
+        continue-on-error: true
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Get Config Files
+        id: config
+        run: |
+          VAR_FILES=$(find config -name "*.tfvars" -printf "-var-file=%p " 2>/dev/null || echo "")
+          echo "var_files=$VAR_FILES" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          set +e
+          set -o pipefail
+          terraform plan \
+            -detailed-exitcode \
+            -no-color \
+            -out=tfplan \
+            ${{ steps.config.outputs.var_files }} \
+            2>&1 | tee plan_output.txt
+          EXITCODE=$?
+
+          echo "exitcode=$EXITCODE" >> "$GITHUB_OUTPUT"
+
+          if [ "$EXITCODE" -eq 2 ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Generate JSON plan for policy checks
+          if [ $EXITCODE -ne 1 ]; then
+            terraform show -json tfplan > tfplan.json
+          fi
+
+          exit 0
+
+      - name: Setup Infracost
+        if: env.INFRACOST_API_KEY != ''
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Run Infracost
+        if: env.INFRACOST_API_KEY != ''
+        run: |
+          infracost breakdown --path tfplan.json \
+            --format=json \
+            --out-file=infracost-usage.json
+
+      - name: Post Infracost Comment
+        if: env.INFRACOST_API_KEY != '' && github.event_name == 'pull_request'
+        run: |
+            infracost comment github \
+              --path infracost-usage.json \
+              --repo "$GITHUB_REPOSITORY" \
+              --github-token ${{ github.token }} \
+              --pull-request ${{ github.event.pull_request.number }} \
+              --behavior update
+
+      - name: Create Plan Summary
+        id: summary
+        run: |
+          PLAN_OUTPUT=$(cat plan_output.txt)
+          ADD=$(echo "$PLAN_OUTPUT" | grep -oP '\d+(?= to add)' || echo "0")
+          CHANGE=$(echo "$PLAN_OUTPUT" | grep -oP '\d+(?= to change)' || echo "0")
+          DESTROY=$(echo "$PLAN_OUTPUT" | grep -oP '\d+(?= to destroy)' || echo "0")
+          {
+            echo "add=$ADD"
+            echo "change=$CHANGE"
+            echo "destroy=$DESTROY"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload Plan Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ github.sha }}
+          path: |
+            ${{ env.WORKING_DIR }}/tfplan
+            ${{ env.WORKING_DIR }}/tfplan.json
+            ${{ env.WORKING_DIR }}/plan_output.txt
+          retention-days: 7
+
+      - name: Post Plan to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+          FMT_OUTCOME: ${{ steps.fmt.outcome }}
+          INIT_OUTCOME: ${{ steps.init.outcome }}
+          VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
+          ADD: ${{ steps.summary.outputs.add }}
+          CHANGE: ${{ steps.summary.outputs.change }}
+          DESTROY: ${{ steps.summary.outputs.destroy }}
+          ENVIRONMENT: ${{ needs.setup.outputs.environment }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const planOutput = fs.readFileSync('${{ env.WORKING_DIR }}/plan_output.txt', 'utf8');
+
+            const fmtStatus = process.env.FMT_OUTCOME === 'success' ? '✅ Passed' : '⚠️ Failed';
+            const initStatus = process.env.INIT_OUTCOME === 'success' ? '✅ Passed' : '❌ Failed';
+            const validateStatus = process.env.VALIDATE_OUTCOME === 'success' ? '✅ Passed' : '❌ Failed';
+
+            const exitCode = parseInt(process.env.PLAN_EXITCODE);
+            let planStatus = '❌ Failed';
+            let planEmoji = '❌';
+            if (exitCode === 0) {
+              planStatus = '✅ No Changes';
+              planEmoji = '✅';
+            } else if (exitCode === 2) {
+              planStatus = '📝 Changes Detected';
+              planEmoji = '📝';
+            }
+
+            const add = process.env.ADD || '0';
+            const change = process.env.CHANGE || '0';
+            const destroy = process.env.DESTROY || '0';
+            const env = process.env.ENVIRONMENT || 'none';
+
+            const output = `## ${planEmoji} Terraform Plan Results
+
+            ### Target Environment: \`${env}\`
+
+            ### Summary
+            | Resource Changes | Count |
+            |------------------|-------|
+            | ➕ To Add | ${add} |
+            | 🔄 To Change | ${change} |
+            | ➖ To Destroy | ${destroy} |
+
+            ### Validation Steps
+            | Step | Status |
+            |------|--------|
+            | 🖌️ Format | ${fmtStatus} |
+            | ⚙️ Init | ${initStatus} |
+            | 🔍 Validate | ${validateStatus} |
+            | 📖 Plan | ${planStatus} |
+
+            <details><summary>📋 Show Full Plan</summary>
+
+            \`\`\`hcl
+            ${planOutput.substring(0, 60000)}
+            \`\`\`
+
+            </details>
+
+            ---
+
+            > **Next Steps:**
+            > 1. Review the plan carefully
+            > 2. Get approval from CODEOWNERS
+            > 3. Merge this PR
+            > 4. Apply will require **manual approval** in the \`${env}\` environment
+
+            *Triggered by: @${{ github.actor }} | Commit: \`${{ github.sha }}\`*`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('Terraform Plan Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: output
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: output
+              });
+            }
+
+      - name: Post Plan Summary (Push)
+        if: github.event_name == 'push'
+        run: |
+          {
+            echo "## Terraform Plan Summary"
+            echo ""
+            echo "**Environment:** \`${{ needs.setup.outputs.environment }}\`"
+            echo ""
+            echo "| Changes | Count |"
+            echo "|---------|-------|"
+            echo "| To Add | ${{ steps.summary.outputs.add }} |"
+            echo "| To Change | ${{ steps.summary.outputs.change }} |"
+            echo "| To Destroy | ${{ steps.summary.outputs.destroy }} |"
+            echo ""
+            echo "**Commit:** \`${{ github.sha }}\`"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${{ steps.plan.outputs.has_changes }}" == "true" ]]; then
+            echo "⏳ **Waiting for manual approval** in the \`${{ needs.setup.outputs.environment }}\` environment." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "✅ **No changes to apply.**" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check Plan Status
+        if: steps.plan.outputs.exitcode == '1'
+        run: |
+          echo "::error::Terraform plan failed. Output follows:"
+          cat plan_output.txt
+          exit 1
+
+  # ===========================================================================
+  # Policy Check: Checkov and Conftest validation
+  # ===========================================================================
+  policy-check:
+    name: Policy Check
+    runs-on: ubuntu-latest
+    needs: [setup, plan]
+    if: needs.plan.outputs.plan_exitcode != '1'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Plan Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ github.sha }}
+          path: ${{ env.WORKING_DIR }}
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform
+          framework: terraform
+          config_file: terraform/policies/checkov/.checkov.yaml
+          output_format: cli,sarif
+          output_file_path: console,checkov-results.sarif
+          soft_fail: true
+        continue-on-error: true
+
+      - name: Setup Conftest
+        run: |
+          CONFTEST_VERSION="0.46.0"
+          wget -q "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          tar xzf conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz
+          sudo mv conftest /usr/local/bin/
+
+      - name: Run Conftest Policy Check
+        id: conftest
+        run: |
+          echo "## Policy Check Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f "terraform/policies/conftest/policy/main.rego" ]; then
+            echo "### Conftest Results" >> "$GITHUB_STEP_SUMMARY"
+            conftest test terraform/tfplan.json \
+              --policy terraform/policies/conftest/policy \
+              --no-fail 2>&1 | tee conftest_output.txt
+            cat conftest_output.txt >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ℹ️ No Conftest policies found. Skipping." >> "$GITHUB_STEP_SUMMARY"
+          fi
+        continue-on-error: true
+
+  # ===========================================================================
+  # Apply: Requires manual approval via GitHub Environment
+  # ===========================================================================
+  apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    needs: [setup, plan, policy-check]
+    if: |
+      needs.setup.outputs.should_apply == 'true' &&
+      needs.plan.outputs.has_changes == 'true' &&
+      needs.setup.outputs.environment != 'none'
+    timeout-minutes: 30
+
+    # IMPORTANT: This environment requires manual approval
+    # Configure in: Settings → Environments → [env] → Required reviewers
+    environment: ${{ needs.setup.outputs.environment }}
+
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Download Plan Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ github.sha }}
+          path: ${{ env.WORKING_DIR }}
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.GCP_STATE_BUCKET }}"
+          terraform get -update
+
+      - name: Terraform Apply
+        run: |
+          set -o pipefail
+          {
+            echo "## Terraform Apply"
+            echo ""
+            echo "**Environment:** \`${{ needs.setup.outputs.environment }}\`"
+            echo "**Approved by:** @${{ github.actor }}"
+            echo ""
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          terraform apply -auto-approve tfplan | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post Deployment Summary
+        if: always()
+        run: |
+          {
+            echo ""
+            echo "---"
+            echo ""
+            echo "## Deployment Complete"
+            echo ""
+            echo "| Detail | Value |"
+            echo "|--------|-------|"
+            echo "| Status | \`${{ job.status }}\` |"
+            echo "| Environment | \`${{ needs.setup.outputs.environment }}\` |"
+            echo "| Deployed by | @${{ github.actor }} |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Time | $(date -u '+%Y-%m-%d %H:%M:%S UTC') |"
+          } >> "$GITHUB_STEP_SUMMARY"

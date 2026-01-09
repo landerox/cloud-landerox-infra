@@ -1,0 +1,47 @@
+# =============================================================================
+# Template GCP - Environment Configuration
+# =============================================================================
+#
+# Copy this file to terraform.tfvars:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# IMPORTANT: Resource definitions (buckets, service accounts, networks)
+# belong in config/*.tf files within the config directory, NOT here.
+#
+# =============================================================================
+
+# === Project Configuration ===
+project_id         = "your-project-id"
+environment        = "env"   # dev, tst, prd, none
+region             = "your-region"
+state_bucket       = "your-project-id-tfstate"
+state_bucket_class = "STANDARD"
+
+# === Repository (for CI/CD reference) ===
+repository_id                      = "your-github-user/your-github-repo"
+workload_identity_pool_id          = "github-pool"
+workload_identity_pool_provider_id = "github-provider"
+
+# Trusted repositories for WIF
+# wif_repositories = [
+#   {
+#     repo            = "your-github-user/your-github-repo"
+#     service_account = "your-service-account"
+#   }
+# ]
+
+# === Governance Labels (Enterprise) ===
+cost_center         = "shared-services"
+owner               = "platform-team"
+data_classification = "internal" # public, internal, confidential, restricted
+compliance_scope    = "none"     # none, soc2, pci-dss, hipaa
+
+# === Module Toggles ===
+# Enable/disable modules based on your needs.
+enable_iam_module               = true
+enable_storage_module           = true
+enable_artifact_registry_module = true
+enable_cloud_run_module         = true
+enable_secrets_module           = true
+enable_scheduler_module         = true
+enable_bigquery_module          = false

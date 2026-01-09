@@ -1,0 +1,145 @@
+# =============================================================================
+# Checkov Configuration
+# =============================================================================
+#
+# This file configures Checkov security scanning for Terraform.
+# Customize skip-check and other settings for your organization's needs.
+#
+# Documentation: https://www.checkov.io/2.Basics/CLI%20Command%20Reference.html
+#
+# =============================================================================
+
+# Framework to scan
+framework:
+  - terraform
+
+# Scan directory
+directory:
+  - .
+
+# Output settings
+compact: true
+quiet: false
+
+# Evaluate variable values
+evaluate-variables: true
+
+# Download external modules for scanning
+download-external-modules: false
+
+# =============================================================================
+# Skip Checks
+# =============================================================================
+# Add checks to skip with justification comments.
+# Only skip checks when there's a valid business reason.
+#
+# Format: CKV_<provider>_<number>
+# Find check IDs: https://www.checkov.io/5.Policy%20Index/terraform.html
+# =============================================================================
+
+skip-check:
+  # -----------------------------------------------------------------------------
+  # GCP-specific skips (with justification)
+  # -----------------------------------------------------------------------------
+
+  # CKV_GCP_62: Ensure Cloud Armor prevents message lookup in Log4j2
+  # Justification: Cloud Armor not used in this bootstrap template
+  - CKV_GCP_62
+
+  # CKV_GCP_78: Ensure Cloud Armor prevents attack against Log4j2
+  # Justification: Cloud Armor not used in this bootstrap template
+  - CKV_GCP_78
+
+  # CKV2_GCP_5: Ensure that Cloud Storage bucket secrets are encrypted using CMEK
+  # Justification: Bootstrap uses Google-managed encryption; CMEK optional per org policy
+  - CKV2_GCP_5
+
+  # CKV_GCP_80: Ensure that Cloud Storage buckets are encrypted with CMEK
+  # Justification: CMEK is optional and configured via variables
+  - CKV_GCP_80
+
+  # CKV_GCP_114: Ensure public access prevention is enforced
+  # Justification: Configurable via variables (defaults to inherited)
+  - CKV_GCP_114
+
+  # CKV_GCP_29: Ensure valid Uniform Bucket Level Access
+  # Justification: Configurable via variables (defaults to true)
+  - CKV_GCP_29
+
+  # CKV_GCP_84: Ensure Artifact Registry Repositories are encrypted with CSEK
+  # Justification: CSEK is optional and configured via variables
+  - CKV_GCP_84
+
+  # CKV_GCP_81: Ensure Big Query Datasets are encrypted with CSEK
+  # Justification: CSEK is optional and configured via variables
+  - CKV_GCP_81
+
+  # CKV_GCP_121: Ensure BigQuery tables have deletion protection enabled
+  # Justification: Deletion protection is configurable via variable (defaults to true/false depending on env)
+  - CKV_GCP_121
+
+  # CKV_GCP_125: Ensure GCP GitHub Actions OIDC trust policy is configured securely
+  # Justification: Repository constraint is enforced via attribute_condition logic in the module
+  - CKV_GCP_125
+
+  # ----------------------------------------------------------------------------
+  # Cloud SQL Skips
+  # ----------------------------------------------------------------------------
+  - CKV_GCP_60  # Public IP enabled via variable
+  - CKV_GCP_14  # Backups configured via variables
+  - CKV_GCP_79  # Major version configured via variables
+  - CKV_GCP_6   # SSL enforced via code (false positive)
+
+  # ----------------------------------------------------------------------------
+  # Vertex AI Skips
+  # ----------------------------------------------------------------------------
+  - CKV2_GCP_21 # CMEK optional
+  - CKV_GCP_89  # Private IP enforced via variable (false positive)
+
+  # ----------------------------------------------------------------------------
+  # GKE Skips
+  # ----------------------------------------------------------------------------
+  - CKV_GCP_65  # RBAC with Google Groups optional
+  - CKV_GCP_66  # Binary Authorization optional
+  - CKV_GCP_12  # Network Policy optional
+  - CKV_GCP_21  # Labels enforced via variable (false positive)
+  - CKV_GCP_10  # Auto-upgrade passed from variable
+  - CKV_GCP_9   # Auto-repair passed from variable
+  - CKV_GCP_69  # Metadata server enabled (false positive?)
+
+  # ----------------------------------------------------------------------------
+  # Networking Skips
+  # ----------------------------------------------------------------------------
+  - CKV_GCP_74  # Private Google Access configurable via variable
+  # -----------------------------------------------------------------------------
+  # Add organization-specific skips below
+  # -----------------------------------------------------------------------------
+  # Example:
+  # - CKV_GCP_XX  # Justification: <reason>
+
+# =============================================================================
+# Custom Policies
+# =============================================================================
+# External checks directory for custom policies
+# Uncomment to enable custom checks
+
+# external-checks-dir:
+#   - policies/checkov/custom
+
+# =============================================================================
+# Soft Fail Configuration
+# =============================================================================
+# Set to false in production to fail on policy violations
+# Set to true during initial adoption to get visibility without blocking
+
+soft-fail: false
+
+# =============================================================================
+# Check Severity Filter
+# =============================================================================
+# Uncomment to only fail on specific severities
+# Options: critical, high, medium, low
+
+# check:
+#   - severity:critical
+#   - severity:high

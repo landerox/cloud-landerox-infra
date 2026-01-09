@@ -1,0 +1,196 @@
+# =============================================================================
+# CI Workflow - Linting, Validation, and Security Scanning
+# =============================================================================
+#
+# This workflow runs on all PRs and pushes. It does NOT require GCP
+# authentication, so it can run on forks and provides fast feedback.
+#
+# Checks performed:
+#   - Pre-commit hooks (format, lint, security)
+#   - Terraform validation
+#   - Security scanning (Checkov)
+#   - Documentation validation
+#
+# =============================================================================
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: "1.10"
+  TFLINT_VERSION: "v0.50.0"
+
+jobs:
+  # ===========================================================================
+  # Pre-commit: Runs all configured hooks
+  # ===========================================================================
+  pre-commit:
+    name: Pre-commit Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Setup Python
+        run: uv python install 3.12
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Setup TFLint
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -sSLo tflint.zip https://github.com/terraform-linters/tflint/releases/download/${{ env.TFLINT_VERSION }}/tflint_linux_amd64.zip
+          unzip tflint.zip
+          chmod +x tflint
+          sudo mv tflint /usr/local/bin/
+          rm -f tflint.zip
+          tflint --init
+
+      - name: Setup Terraform Docs
+        run: |
+          curl -sSLo terraform-docs.tar.gz https://github.com/terraform-docs/terraform-docs/releases/download/v0.21.0/terraform-docs-v0.21.0-linux-amd64.tar.gz
+          mkdir -p tf-docs-temp
+          tar -xzf terraform-docs.tar.gz -C tf-docs-temp
+          chmod +x tf-docs-temp/terraform-docs
+          sudo mv tf-docs-temp/terraform-docs /usr/local/bin/
+          rm -rf tf-docs-temp terraform-docs.tar.gz
+
+      - name: Cache Pre-commit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: Install Dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Run Pre-commit
+        uses: pre-commit/action@v3.0.1
+        with:
+          extra_args: --all-files --show-diff-on-failure
+        env:
+          SKIP: terraform_validate,terraform_checkov,no-commit-to-branch,checkov
+
+  # ===========================================================================
+  # Terraform Validate: Basic syntax validation
+  # ===========================================================================
+  validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Cache Terraform Plugins
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.terraform.d/plugin-cache
+            terraform/.terraform
+          key: terraform-${{ runner.os }}-${{ hashFiles('terraform/.terraform.lock.hcl') }}
+          restore-keys: |
+            terraform-${{ runner.os }}-
+
+      - name: Terraform Init (Backend Disabled)
+        run: |
+          rm -rf .terraform
+          mv backend.tf backend.tf.disabled
+          terraform init -backend=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+  # ===========================================================================
+  # Security: Checkov security and compliance scanning with SARIF output
+  # ===========================================================================
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform
+          framework: terraform
+          config_file: terraform/policies/checkov/.checkov.yaml
+          output_format: cli,sarif
+          output_file_path: console,checkov-results.sarif
+          soft_fail: true
+
+      - name: Post Security Summary
+        if: always()
+        run: |
+          {
+            echo "## Security Scan Complete"
+            echo ""
+            echo "Checkov security scan has completed. Results are available in:"
+            echo "- Workflow logs above"
+            echo "- GitHub Security tab (if SARIF upload succeeded)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # Docs: Validate documentation is up to date
+  # ===========================================================================
+  docs:
+    name: Documentation Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform Docs
+        run: |
+          curl -sSLo terraform-docs.tar.gz https://github.com/terraform-docs/terraform-docs/releases/download/v0.21.0/terraform-docs-v0.21.0-linux-amd64.tar.gz
+          mkdir -p tf-docs-temp
+          tar -xzf terraform-docs.tar.gz -C tf-docs-temp
+          chmod +x tf-docs-temp/terraform-docs
+          sudo mv tf-docs-temp/terraform-docs /usr/local/bin/
+          rm -rf tf-docs-temp terraform-docs.tar.gz
+
+      - name: Check Docs Are Generated
+        run: |
+          # Check root terraform directory
+          terraform-docs --config .terraform-docs.yml terraform/ --output-check
+
+          # Check each module
+          for dir in terraform/modules/*; do
+            if [ -d "$dir" ]; then
+              terraform-docs --config .terraform-docs.yml "$dir" --output-check
+            fi
+          done
+          echo "Documentation is up to date"

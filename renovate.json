@@ -1,0 +1,101 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    ":separateMajorReleases",
+    "group:allNonMajor"
+  ],
+  "description": "Automated dependency updates for cloud-landerox",
+  "labels": ["dependencies", "automated"],
+  "prHourlyLimit": 2,
+  "prConcurrentLimit": 5,
+  "timezone": "UTC",
+  "schedule": ["before 6am on monday"],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"]
+  },
+  "packageRules": [
+    {
+      "description": "Terraform providers",
+      "matchManagers": ["terraform"],
+      "matchPackagePatterns": ["^hashicorp/"],
+      "groupName": "terraform-providers",
+      "automerge": false,
+      "labels": ["terraform", "dependencies"]
+    },
+    {
+      "description": "Google provider updates",
+      "matchManagers": ["terraform"],
+      "matchPackageNames": ["hashicorp/google", "hashicorp/google-beta"],
+      "groupName": "google-providers",
+      "automerge": false,
+      "labels": ["terraform", "gcp", "dependencies"]
+    },
+    {
+      "description": "GitHub Actions",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions",
+      "automerge": true,
+      "automergeType": "pr",
+      "labels": ["ci", "dependencies"]
+    },
+    {
+      "description": "Pre-commit hooks",
+      "matchManagers": ["pre-commit"],
+      "groupName": "pre-commit-hooks",
+      "automerge": true,
+      "automergeType": "pr",
+      "labels": ["pre-commit", "dependencies"]
+    },
+    {
+      "description": "Major version updates require manual review",
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "labels": ["major-update", "needs-review"]
+    },
+    {
+      "description": "Pin Terraform version",
+      "matchManagers": ["terraform"],
+      "matchDepTypes": ["required_version"],
+      "enabled": false
+    }
+  ],
+  "terraform": {
+    "enabled": true,
+    "fileMatch": ["\\.tf$"]
+  },
+  "pre-commit": {
+    "enabled": true
+  },
+  "github-actions": {
+    "enabled": true,
+    "fileMatch": ["^\\.github/workflows/[^/]+\\.ya?ml$"]
+  },
+  "regexManagers": [
+    {
+      "description": "Update Terraform version in workflow",
+      "fileMatch": ["^\\.github/workflows/.*\\.ya?ml$"],
+      "matchStrings": ["TF_VERSION:\\s*[\"']?(?<currentValue>[^\"'\\s]+)[\"']?"],
+      "depNameTemplate": "hashicorp/terraform",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v?(?<version>.*)$"
+    },
+    {
+      "description": "Update TFLint version in workflow",
+      "fileMatch": ["^\\.github/workflows/.*\\.ya?ml$"],
+      "matchStrings": ["TFLINT_VERSION:\\s*[\"']?(?<currentValue>v?[0-9.]+)[\"']?"],
+      "depNameTemplate": "terraform-linters/tflint",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "description": "Update Conftest version in workflow",
+      "fileMatch": ["^\\.github/workflows/.*\\.ya?ml$"],
+      "matchStrings": ["CONFTEST_VERSION=[\"']?(?<currentValue>[0-9.]+)[\"']?"],
+      "depNameTemplate": "open-policy-agent/conftest",
+      "datasourceTemplate": "github-releases"
+    }
+  ]
+}
