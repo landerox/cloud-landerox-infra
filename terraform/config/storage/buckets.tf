@@ -103,5 +103,53 @@ locals {
         safety  = "high"
       }
     }
+
+    # ===========================================================================
+    # DATAFLOW OPERATIONAL STORAGE
+    # ===========================================================================
+    "${var.project_id}-dataflow" = {
+      location           = "US"
+      storage_class      = "STANDARD"
+      uniform_access     = true
+      versioning_enabled = false
+
+      # Cleanup: Delete temporary files and staging artifacts older than 7 days
+      enable_lifecycle = true
+      lifecycle_rules = [
+        {
+          action_type = "Delete"
+          age_days    = 7
+        }
+      ]
+
+      labels = {
+        purpose = "dataflow-staging"
+        team    = "data"
+      }
+    }
+
+    # ===========================================================================
+    # CLOUD FUNCTIONS SOURCE CODE
+    # ===========================================================================
+    "${var.project_id}-sources" = {
+      location           = "US"
+      storage_class      = "STANDARD"
+      uniform_access     = true
+      versioning_enabled = false
+
+      # Cleanup: Delete old source code archives after 7 days to save costs
+      enable_lifecycle = true
+      lifecycle_rules = [
+        {
+          action_type = "Delete"
+          age_days    = 7
+        }
+      ]
+
+      labels = {
+        purpose = "deployment-sources"
+        team    = "platform"
+      }
+    }
   }
 }
