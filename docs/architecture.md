@@ -73,5 +73,6 @@ The following modules are available and configured for **Google Provider 7.x**:
 
 - **Identities:**
   - `sa-deployment`: Used by CI/CD pipelines to build and deploy services.
-  - `sa-functions`: Used by runtime services (least privilege access).
+  - `sa-functions`: Used by Cloud Functions at runtime (least privilege access).
+  - `sa-dataflow`: Used by Dataflow workers during pipeline execution.
 - **Security:** Workload Identity Federation (WIF) allows secure, keyless deployments from trusted external repositories.
