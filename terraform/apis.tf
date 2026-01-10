@@ -13,10 +13,14 @@ locals {
     "cloudresourcemanager.googleapis.com", # Project and Resource Management
     "cloudscheduler.googleapis.com",       # Cron Jobs
     "cloudtrace.googleapis.com",           # Required by Cloud Scheduler
+    "compute.googleapis.com",              # Compute Engine for Dataflow workers
+    "dataflow.googleapis.com",             # Dataflow Service
+    "eventarc.googleapis.com",             # Eventarc for Cloud Functions triggers
     "iam.googleapis.com",                  # Identity and Access Management
     "iamcredentials.googleapis.com",       # Required for WIF and impersonation
     "logging.googleapis.com",              # Stackdriver Logging
     "monitoring.googleapis.com",           # Stackdriver Monitoring
+    "pubsub.googleapis.com",               # Pub/Sub Messaging
     "run.googleapis.com",                  # Cloud Run & Cloud Functions v2
     "secretmanager.googleapis.com",        # Secrets Management
     "serviceusage.googleapis.com",         # Enable/Disable APIs
